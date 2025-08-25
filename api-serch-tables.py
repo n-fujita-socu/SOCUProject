@@ -8,7 +8,7 @@ config_ini = configparser.ConfigParser()
 config_ini.read("config.ini", encoding="utf-8")
 API_KEY = config_ini["API"]["KEY"]
 URL = config_ini["API"]["url_list"]
-PARAMS = {"appId": API_KEY, "searchWord": "月次", "surveyYears": 2015, "limit": 1500}
+PARAMS = {"appId": API_KEY, "searchWord": "月次", "surveyYears": 2015, "limit": 15}
 
 response = requests.get(URL, params=PARAMS)
 json_data = response.json()

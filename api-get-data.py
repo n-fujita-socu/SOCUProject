@@ -2,6 +2,7 @@ import requests
 import sqlite3
 import pandas as pd
 import configparser
+import time
 
 # -------------------------------
 # 0. 変数の初期化
@@ -24,6 +25,75 @@ df_pivoted = pd.DataFrame()
 # -------------------------------
 # ユーティリティ
 # -------------------------------
+
+
+def fetch_estat_paged(
+    URL,
+    API_KEY,
+    stats_data_id,
+    page_size=2000,
+    max_total=None,
+    extra_params=None,
+    sleep_sec=0.2,
+):
+    """
+    e-Stat getStatsData をページングで取得する。
+    - page_size : 1回のAPI取得件数（<=100000 が目安）
+    - max_total : 総取得上限。None の場合は全件取得。
+    戻り値: 最初のレスポンス構造を踏襲した dict（...DATA_INF.VALUE が全ページ連結）
+    """
+    params_base = {"appId": API_KEY, "statsDataId": stats_data_id}
+    if extra_params:
+        params_base.update(extra_params)
+    first_json = None
+    all_values = []
+    start_pos = 1
+    keep_fetching = True
+
+    while keep_fetching:
+        if max_total is None:
+            limit_this = page_size
+        else:
+            remaining = max_total - len(all_values)
+            if remaining <= 0:
+                break
+            limit_this = min(page_size, remaining)
+
+        params = params_base.copy()
+        params["startPosition"] = start_pos
+        params["limit"] = limit_this
+
+        resp = requests.get(URL, params=params)
+        resp.raise_for_status()
+        js = resp.json()
+
+        if first_json is None:
+            first_json = js
+        values = js["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"].get("VALUE", [])
+        if isinstance(values, dict):
+            values = [values]
+        all_values.extend(values)
+        ri = js["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]
+        total = int(ri.get("TOTAL_NUMBER", 0))
+        to_num = int(ri.get("TO_NUMBER", 0))
+        if to_num >= total:
+            keep_fetching = False
+        else:
+            start_pos = to_num + 1
+        if (max_total is not None) and (len(all_values) >= max_total):
+            keep_fetching = False
+
+        time.sleep(sleep_sec)
+    if first_json is None:
+        raise RuntimeError("APIからデータを取得できませんでした。")
+
+    first_json["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"] = all_values
+    ri0 = first_json["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]
+    ri0["FROM_NUMBER"] = 1 if all_values else 0
+    ri0["TO_NUMBER"] = len(all_values)
+    return first_json
+
+
 def _normalize_class_list(obj):
     """CLASS_OBJのCLASSがdict/listどちらでも反復可能なlistに正規化"""
     cl = obj.get("CLASS", [])
@@ -116,20 +186,43 @@ DB_PATH = config_ini["DB"]["data"]
 # -------------------------------
 # 2. APIパラメータの設定
 # -------------------------------
+
 limit_num = 2000
+page_size = 200  # 1ページの取得件数（必要に応じて調整。全件でもよい）
 stats_idS = {
     1: "0003423953",  # 機械受注統計調査
     2: "0003348423",  # 景気ウォッチャー調査
 }
-chosen_stat = 2
+chosen_stat = 1
+
+# 追加の絞り込みがあれば extra_params に
+EXTRA = {}  # 例: {"lang": "J", "cdCat01": "XXX"} など
 stat_id = stats_idS.get(chosen_stat)
+
+
 # -------------------------------
 # 3. APIリクエスト
 # -------------------------------
-PARAMS = {"appId": API_KEY, "statsDataId": stat_id, "limit": limit_num}
-response = requests.get(URL, params=PARAMS)
-response.raise_for_status()
-json_data = response.json()
+# PARAMS = {"appId": API_KEY, "statsDataId": stat_id, "limit": limit_num}
+# response = requests.get(URL, params=PARAMS)
+# response.raise_for_status()
+# json_data = response.json()
+print("APIリクエスト開始。")
+
+
+json_data = fetch_estat_paged(
+    URL,
+    API_KEY,
+    stat_id,
+    page_size=page_size,
+    max_total=limit_num,
+    extra_params=EXTRA,
+    sleep_sec=0.2,
+)
+
+
+print("APIリクエスト完了。")
+
 ###### 3_複数の同時リクエスト（将来的に使用、将来的に追加でlimit_num=2000以上の処理の対応も必要）
 ###### for key in stats_idS:
 ######    print(f"統計表 {key} の処理開始")
@@ -332,6 +425,6 @@ else:
 
 conn.close()
 
-print("統計値は 'estat_values' に列単位で更新・追加されました。")
-print("分類要約は 'estat_class_info' に保存されました。")
-print("列メタは 'estat_column_meta' に保存/更新されました。")
+print("統計値-> 'estat_values'")
+print("分類要約->'estat_class_info'")
+print("列メタは->'estat_column_meta'")
