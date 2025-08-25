@@ -116,7 +116,7 @@ DB_PATH = config_ini["DB"]["data"]
 # -------------------------------
 # 2. APIパラメータの設定
 # -------------------------------
-limit_num = 5
+limit_num = 2000
 stats_idS = {
     1: "0003423953",  # 機械受注統計調査
     2: "0003348423",  # 景気ウォッチャー調査
@@ -146,12 +146,9 @@ table_info = STATISTICAL_DATA["TABLE_INF"]
 stat_name = table_info["STAT_NAME"]["$"]
 title = table_info["TITLE"]
 
-# 軸のマップと cat 軸を検出（追加）
 maps = build_code_name_maps(class_info)
 cat_axes = detect_cat_axes(maps, max_cat=10)  # 例: ['cat01', 'cat02', ...]
 
-
-# 既存の df_summary 互換（cat01/cat02のみ反映。cat03以降は列メタで管理）
 tab_code = ""
 cat01_list, cat02_list = [], []
 class_objs = class_info.get("CLASS_OBJ", [])
@@ -161,7 +158,6 @@ if isinstance(class_objs, dict):
 for obj in class_objs:
     cid = obj.get("@id")
     if cid == "tab":
-        # CLASS が dict/list どちらでも対応
         cls = _normalize_class_list(obj)
         if cls:
             tab_code = cls[0].get("@code", "")
@@ -188,48 +184,34 @@ df_summary = pd.DataFrame(
 )
 
 # -------------------------------
-# 5. 統計値の整形とピボット処理（改良）
+# 5. 統計値の整形とピボット処理
 # -------------------------------
 data_values = STATISTICAL_DATA["DATA_INF"]["VALUE"]
 df_values = pd.json_normalize(data_values)
 
-# 存在する cat 軸はすべて DataFrame に補完（cat02が無い統計などに対応）
 for axis in cat_axes:
     col = f"@{axis}"
     if col not in df_values.columns:
         df_values[col] = ""
 
-# 値（$）を数値化（変換不能は NaN）
-# 必要に応じて前処理（カンマや特殊記号除去）を追加してもよい
 df_values["$"] = pd.to_numeric(df_values["$"], errors="coerce")
 
-# 列キーを作成：'tab-<code>_cat01-<code>_cat02-<code>_...'
 df_values["col_key"] = df_values.apply(
     lambda r: build_col_key_from_row(r, cat_axes), axis=1
 )
 
-# time を堅牢にパース → 粒度に応じて正規化（ここでは月初）
-df_values["id"] = df_values["@time"].apply(parse_time)
+df_values["id"] = df_values["@time"]
 
-
-df_values["id"] = df_values["id"].dt.to_period("M").dt.to_timestamp(how="start")
-
-
-# ピボット（列＝col_key）
 df_transformed = df_values[["id", "col_key", "$"]]
 df_pivoted = df_transformed.pivot(index="id", columns="col_key", values="$")
 df_pivoted.reset_index(inplace=True)
 
-# SQLite保存は TEXT のため id を ISO 文字列に
-df_pivoted["id"] = df_pivoted["id"].dt.strftime("%Y-%m-%d")
-
 # -------------------------------
-# 6. SQLite保存（差分更新・列メタ保存）（改良）
+# 6. SQLite保存
 # -------------------------------
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
-# 統計値テーブルの更新・追加（セル単位アップデート）
 cursor.execute(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='estat_values'"
 )
@@ -249,24 +231,19 @@ else:
 
     # id をキーに index 化
     if "id" not in df_existing.columns:
-        # 既存テーブルが壊れている場合の保険
         raise RuntimeError("既存テーブル 'estat_values' に id 列が見つかりません。")
     df_existing.set_index("id", inplace=True)
     df_new = df_pivoted.set_index("id")
 
-    # 列の和集合で揃える（新列にも対応）
     all_cols = df_existing.columns.union(df_new.columns)
     df_existing = df_existing.reindex(columns=all_cols)
     df_new = df_new.reindex(columns=all_cols)
 
-    # セル単位で更新：新規側の非欠損セルのみ上書き
     df_existing.update(df_new)
 
-    # まるごと新規の id 行を追加
     new_rows = df_new[~df_new.index.isin(df_existing.index)]
     df_final = pd.concat([df_existing, new_rows])
 
-    # 保存
     df_final = df_final.reset_index()
     df_final.to_sql(
         "estat_values",
@@ -276,7 +253,7 @@ else:
         dtype={col: "REAL" for col in df_final.columns if col != "id"} | {"id": "text"},
     )
 
-# 分類情報テーブルの更新・追加（従来どおり）
+# 分類情報テーブルの更新・追加
 cursor.execute(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='estat_class_info'"
 )
@@ -304,10 +281,6 @@ else:
         dtype={col: "text" for col in df_summary if col != "tab"} | {"tab": "INTEGER"},
     )
 
-# 列メタテーブル（新規：列名→各軸コード/名称）を保存
-# 後から "tab-100_cat01-100_cat02-140..." を人可読に戻す用途
-# レコード例：
-#   col_key, tab_code, tab_name, cat01_code, cat01_name, cat02_code, cat02_name, ...
 meta_rows = []
 meta_source_cols = ["col_key", "@tab"] + [f"@{a}" for a in cat_axes]
 df_meta_src = df_values[meta_source_cols].drop_duplicates()
@@ -332,7 +305,6 @@ cursor.execute(
 meta_exists = cursor.fetchone()
 
 if not meta_exists:
-    # 動的 cat 軸の列を持つように dtype を生成
     dtype_meta = {"col_key": "text", "tab_code": "text", "tab_name": "text"}
     for axis in cat_axes:
         dtype_meta[f"{axis}_code"] = "text"
@@ -344,16 +316,12 @@ if not meta_exists:
 else:
     df_colmeta_old = pd.read_sql_query("SELECT * FROM estat_column_meta", conn)
 
-    # 将来、cat 軸が増えた場合にも対応（列の和集合で揃える）
     all_cols_meta = df_colmeta_old.columns.union(df_colmeta_new.columns)
     df_colmeta_old = df_colmeta_old.reindex(columns=all_cols_meta)
     df_colmeta_new = df_colmeta_new.reindex(columns=all_cols_meta)
-
-    # マージ：col_key で合わせ、既存をベースに新規の欠損で補完（既存情報優先）
     old = df_colmeta_old.set_index("col_key")
     new = df_colmeta_new.set_index("col_key")
-    merged = old.combine_first(new)  # 既存を温存しつつ、新規のみ補完
-
+    merged = old.combine_first(new)
     merged.reset_index().to_sql(
         "estat_column_meta",
         conn,
