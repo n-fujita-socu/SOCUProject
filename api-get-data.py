@@ -3,6 +3,7 @@ import sqlite3
 import pandas as pd
 import configparser
 import time
+import numpy as np
 
 # -------------------------------
 # 0. 変数の初期化
@@ -187,7 +188,7 @@ DB_PATH = config_ini["DB"]["data"]
 # 2. APIパラメータの設定
 # -------------------------------
 
-limit_num = 20
+limit_num = 200
 page_size = 200  # 1ページの取得件数（必要に応じて調整。全件でもよい）
 stats_idS = {
     1: "0003423953",  # 機械受注統計調査
@@ -195,8 +196,10 @@ stats_idS = {
 }
 chosen_stat = 1
 
-# 追加の絞り込みがあれば extra_params に
-EXTRA = {}  # 例: {"lang": "J", "cdCat01": "XXX"} など
+# 追加の絞り込みがあれば extra_paramsを設定
+# 例: {"lang": "J", "cdCat01": "XXX"} など
+EXTRA = {"cdCat01": "100", "startTime": "2005"}  # cat01のコード  # 2005年以降
+
 stat_id = stats_idS.get(chosen_stat)
 
 
@@ -298,6 +301,16 @@ df_values["id"] = df_values["@time"]
 df_transformed = df_values[["id", "col_key", "$"]]
 df_pivoted = df_transformed.pivot(index="id", columns="col_key", values="$")
 df_pivoted.reset_index(inplace=True)
+
+df = pd.DataFrame(df_pivoted)
+print(df.head())
+
+# まずは全てのNaNの列を削除する
+df_cleaned = df.dropna(axis=1, how='all')
+
+# 削除後のデータフレームを表示
+print("空の列を削除後のデータフレーム:")
+print(df_cleaned.head())
 
 # -------------------------------
 # 6. SQLite保存
