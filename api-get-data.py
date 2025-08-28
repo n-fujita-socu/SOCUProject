@@ -4,6 +4,29 @@ import pandas as pd
 import configparser
 import time
 import numpy as np
+import matplotlib.pyplot as plt
+
+# -------------------------------
+# 2. APIパラメータの設定
+# -------------------------------
+# 将来的にはstats_idと取得するcatの指定のリストで出来るようにする 1: ("0003355268",("cdCat01": "110","cdCat02": "100"))
+
+limit_num = 25000
+page_size = 200  # 1ページの取得件数（必要に応じて調整。全件でもよい）
+stats_idS = {
+    1: "0003355268",  # 機械受注統計調査
+    2: "0003348423",  # 景気ウォッチャー調査
+}
+chosen_stat = 1
+
+# 追加の絞り込みがあれば extra_paramsを設定
+EXTRA = {
+    "cdCat01": "110",
+    "cdCat02": "100",
+    "cdTimeFrom": "2015",
+    "cdTimeTo": "2026",
+}
+
 
 # -------------------------------
 # 0. 変数の初期化
@@ -24,10 +47,8 @@ df_pivoted = pd.DataFrame()
 
 
 # -------------------------------
-# ユーティリティ
+# 自作関数
 # -------------------------------
-
-
 def fetch_estat_paged(
     URL,
     API_KEY,
@@ -39,7 +60,7 @@ def fetch_estat_paged(
 ):
     """
     e-Stat getStatsData をページングで取得する。
-    - page_size : 1回のAPI取得件数（<=100000 が目安）
+    - page_size : 1回のAPI取得件数（>=100000 はAPI仕様上不可）
     - max_total : 総取得上限。None の場合は全件取得。
     戻り値: 最初のレスポンス構造を踏襲した dict（...DATA_INF.VALUE が全ページ連結）
     """
@@ -163,16 +184,9 @@ def build_col_key_from_row(row, cat_axes):
     return "_".join(parts)
 
 
-def parse_time(t):
-    """@time のフォーマット混在に耐える日付パーサ"""
+def format_time_to_yyyymmdd(t):
     s = str(t).strip()
-    fmts = ["%Y%m%d", "%Y%m", "%Y-%m", "%Y"]  # 必要に応じて拡張
-    for f in fmts:
-        try:
-            return pd.to_datetime(s, format=f)
-        except Exception:
-            pass
-    return pd.to_datetime(s, errors="coerce")
+    return s[:4] + s[-2:] + "01"
 
 
 # -------------------------------
@@ -183,22 +197,6 @@ config_ini.read("config.ini", encoding="utf-8")
 API_KEY = config_ini["API"]["KEY"]
 URL = config_ini["API"]["url_data"]
 DB_PATH = config_ini["DB"]["data"]
-
-# -------------------------------
-# 2. APIパラメータの設定
-# -------------------------------
-
-limit_num = 200
-page_size = 200  # 1ページの取得件数（必要に応じて調整。全件でもよい）
-stats_idS = {
-    1: "0003423953",  # 機械受注統計調査
-    2: "0003348423",  # 景気ウォッチャー調査
-}
-chosen_stat = 1
-
-# 追加の絞り込みがあれば extra_paramsを設定
-# 例: {"lang": "J", "cdCat01": "XXX"} など
-EXTRA = {"cdCat01": "100", "startTime": "2005"}  # cat01のコード  # 2005年以降
 
 stat_id = stats_idS.get(chosen_stat)
 
@@ -226,7 +224,7 @@ json_data = fetch_estat_paged(
 
 print("APIリクエスト完了。")
 
-###### 3_複数の同時リクエスト（将来的に使用、将来的に追加でlimit_num=2000以上の処理の対応も必要）
+###### 3_複数の同時リクエスト（将来的に使用、limit_num=2000以上の処理未対応）
 ###### for key in stats_idS:
 ######    print(f"統計表 {key} の処理開始")
 ######    PARAMS = {"appId": API_KEY, "statsDataId": stats_idS[key], "limit": limit_num}
@@ -234,7 +232,7 @@ print("APIリクエスト完了。")
 ######    json_data = response.json()
 
 # -------------------------------
-# 4. 分類情報の抽出と整形（改良）
+# 4. 分類情報の抽出と整形
 # -------------------------------
 STATISTICAL_DATA = json_data["GET_STATS_DATA"]["STATISTICAL_DATA"]
 class_info = STATISTICAL_DATA["CLASS_INF"]
@@ -243,7 +241,7 @@ stat_name = table_info["STAT_NAME"]["$"]
 title = table_info["TITLE"]
 
 maps = build_code_name_maps(class_info)
-cat_axes = detect_cat_axes(maps, max_cat=10)  # 例: ['cat01', 'cat02', ...]
+cat_axes = detect_cat_axes(maps, max_cat=10)  # ['cat01', 'cat02', ...]
 
 tab_code = ""
 cat01_list, cat02_list = [], []
@@ -296,21 +294,18 @@ df_values["col_key"] = df_values.apply(
     lambda r: build_col_key_from_row(r, cat_axes), axis=1
 )
 
-df_values["id"] = df_values["@time"]
+
+df_values["id"] = df_values["@time"].apply(format_time_to_yyyymmdd)
 
 df_transformed = df_values[["id", "col_key", "$"]]
 df_pivoted = df_transformed.pivot(index="id", columns="col_key", values="$")
 df_pivoted.reset_index(inplace=True)
 
 df = pd.DataFrame(df_pivoted)
+
+# 確認用 後ほど削除予定
 print(df.head())
-
-# まずは全てのNaNの列を削除する
-df_cleaned = df.dropna(axis=1, how='all')
-
-# 削除後のデータフレームを表示
-print("空の列を削除後のデータフレーム:")
-print(df_cleaned.head())
+print(df.isna().mean())
 
 # -------------------------------
 # 6. SQLite保存
@@ -330,14 +325,11 @@ if not table_exists:
         if_exists="replace",
         index=False,
         dtype={col: "REAL" for col in df_pivoted.columns if col != "id"}
-        | {"id": "text"},
+        | {"id": "INTEGER"},
     )
 else:
     df_existing = pd.read_sql_query("SELECT * FROM estat_values", conn)
 
-    # id をキーに index 化
-    if "id" not in df_existing.columns:
-        raise RuntimeError("既存テーブル 'estat_values' に id 列が見つかりません。")
     df_existing.set_index("id", inplace=True)
     df_new = df_pivoted.set_index("id")
 
@@ -345,18 +337,19 @@ else:
     df_existing = df_existing.reindex(columns=all_cols)
     df_new = df_new.reindex(columns=all_cols)
 
-    df_existing.update(df_new)
+    df_final = df_new.combine_first(df_existing)
 
-    new_rows = df_new[~df_new.index.isin(df_existing.index)]
-    df_final = pd.concat([df_existing, new_rows])
-
+    # 整形処理
     df_final = df_final.reset_index()
+    df_final = df_final.dropna(axis=1, how="all")
+    df_final = df_final.sort_values("id", ascending=False)
+
     df_final.to_sql(
         "estat_values",
         conn,
         if_exists="replace",
         index=False,
-        dtype={col: "REAL" for col in df_final.columns if col != "id"} | {"id": "text"},
+        dtype={col: "REAL" for col in df_final.columns if col != "id"},
     )
 
 # 分類情報テーブルの更新・追加
@@ -427,13 +420,15 @@ else:
     df_colmeta_new = df_colmeta_new.reindex(columns=all_cols_meta)
     old = df_colmeta_old.set_index("col_key")
     new = df_colmeta_new.set_index("col_key")
-    merged = old.combine_first(new)
-    merged.reset_index().to_sql(
+
+    merged = old.combine_first(new)  # 更新された old を merged として扱う
+
+    merged.reset_index().sort_values("col_key").to_sql(
         "estat_column_meta",
         conn,
         if_exists="replace",
         index=False,
-        dtype={c: "text" for c in merged.columns},
+        dtype={c: "INTEGER" for c in merged.columns},
     )
 
 conn.close()
